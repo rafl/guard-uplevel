@@ -3,7 +3,7 @@
 #include "XSUB.h"
 
 struct trampoline_ud {
-    UV uplevel;
+    int uplevel;
     SV *cb;
 };
 
@@ -14,7 +14,7 @@ struct uplevel_entersub {
     OP *retop;
 };
 
-STATIC void setup_trampoline (pTHX_ UV, SV *);
+STATIC void setup_trampoline (pTHX_ int, SV *);
 
 /* Originally stolen from pp_ctl.c; now significantly different */
 
@@ -91,27 +91,22 @@ upcontext(pTHX_ I32 count, COP **cop_p, PERL_CONTEXT **ccstack_p,
 STATIC OP *
 invoke_cb (pTHX)
 {
+    warn("exec");
+}
+
+STATIC OP *
+resetup_trampoline (pTHX)
+{
     OP *ret;
     struct uplevel_entersub *op = (struct uplevel_entersub *)PL_op;
 
-    if (op->ud.uplevel == 0) {
-        dSP;
-        PUSHMARK(SP);
-        PUTBACK;
-        warn("exec");
-        call_sv(op->ud.cb, G_VOID | G_DISCARD);
-        PUTBACK;
-        FREETMPS;
-        LEAVE;
-        SvREFCNT_dec(op->ud.cb);
-//        op->cx->blk_sub.retop = op->retop;
-    }
-    else {
-        setup_trampoline(aTHX_ --op->ud.uplevel, op->ud.cb);
-    }
+    assert(op->ud.uplevel > 0);
+
+    setup_trampoline(aTHX_ op->ud.uplevel - 1, op->ud.cb);
 
     ret = op->op.op_next;
     //op->cx->blk_sub.retop = op->retop;
+    //Safefree(op->ud);
     //Safefree(op);
     return ret;
 }
@@ -133,34 +128,29 @@ trampoline_cb (pTHX_ void *_ud)
         croak("cx_type is %d, not CXt_SUB", cx->cx_type);
     }
 
-    if (ud->uplevel == 0) {
-        warn("nao");
-        Newxz(fake_op, 1, OP);
-        fake_op->op_next = PL_op->op_next;
-        PL_op = PL_op->op_next;
-    }
-    else {
-        Newxz(trampoline_op, 1, struct uplevel_entersub);
-        trampoline_op->op.op_type = OP_ENTERSUB;
-        trampoline_op->op.op_next = PL_op->op_next;
-        trampoline_op->op.op_ppaddr = invoke_cb;
-        trampoline_op->ud.uplevel = ud->uplevel;
-        trampoline_op->ud.cb = ud->cb;
-        trampoline_op->cx = cx;
-        trampoline_op->retop = cx->blk_sub.retop;
+    Newxz(trampoline_op, 1, struct uplevel_entersub);
+    trampoline_op->op.op_type = OP_ENTERSUB;
+    trampoline_op->op.op_next = PL_op->op_next;
+    trampoline_op->op.op_ppaddr = (ud->uplevel == 0)
+        ? invoke_cb
+        : resetup_trampoline;
+    trampoline_op->ud.uplevel = ud->uplevel;
+    trampoline_op->ud.cb = ud->cb;
+    trampoline_op->cx = cx;
+    trampoline_op->retop = cx->blk_sub.retop;
 
-        Newxz(fake_op, 1, OP); /* leak */
-        fake_op->op_next = (OP *)trampoline_op;
 
-        PL_op = fake_op;
-        cx->blk_sub.retop = fake_op->op_next;
-    }
+    Newxz(fake_op, 1, OP); /* leak */
+    fake_op->op_next = (OP *)trampoline_op;
+
+    PL_op = fake_op;
+    cx->blk_sub.retop = fake_op->op_next;
 
     Safefree(ud);
 }
 
 STATIC void
-setup_trampoline (pTHX_ UV uplevel, SV *cb)
+setup_trampoline (pTHX_ int uplevel, SV *cb)
 {
     struct trampoline_ud *ud;
 
@@ -179,7 +169,7 @@ PROTOTYPES: disable
 
 void
 scope_guard (uplevel, cb)
-        UV uplevel
+        int uplevel
         SV *cb
     PPCODE:
         setup_trampoline(aTHX_ uplevel, newSVsv(cb));
